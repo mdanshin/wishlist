@@ -1,35 +1,134 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="ru">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Wishlist</title>
+    <title>Wishlist — личный список желаний</title>
     <link rel="stylesheet" href="src/styles.css?v=1.0.2">
 </head>
 <body>
-    <div id="app">
-        <h1>Wishlist</h1>
+    <div id="app" class="app-shell">
+        <header class="app-header">
+            <div class="brand">
+                <h1 class="app-title">Wishlist</h1>
+                <span id="app-version" class="app-version" aria-live="polite"></span>
+            </div>
+            <div class="user-controls">
+                <div id="auth" class="auth-controls">
+                    <button id="login" class="button button--primary">Войти через Google</button>
+                </div>
+                <div id="user-info" class="user-panel" style="display:none;">
+                    <img id="user-avatar" class="user-avatar" alt="" hidden>
+                    <div class="user-meta">
+                        <span id="user-name" class="user-name"></span>
+                        <span id="user-email" class="user-email"></span>
+                    </div>
+                    <button id="logout" class="button button--ghost" style="display:none;">Выйти</button>
+                </div>
+            </div>
+        </header>
 
-        <div id="auth">
-            <button id="login">Login with Google</button>
-            <button id="logout" style="display:none;">Logout</button>
-        </div>
+        <main class="app-main">
+            <section id="login-hero" class="login-hero">
+                <h2>Собирайте свои желания в одном месте</h2>
+                <p>Авторизуйтесь через Google, чтобы создавать карточки, отмечать покупки и делиться ссылками на подарки.</p>
+                <button class="button button--primary button--hero" data-action="login">Войти</button>
+            </section>
 
-        <div id="user-info" style="display:none;">
-            <h2>User Info</h2>
-            <p id="user-name"></p>
-            <p id="user-email"></p>
-        </div>
+            <section id="wishlist-section" class="wishlist-section" style="display:none;">
+                <div class="layout">
+                    <aside class="composer" aria-labelledby="composer-title">
+                        <div class="composer-header">
+                            <h2 id="composer-title">Новое желание</h2>
+                            <p class="composer-subtitle">Обязательное поле отмечено звёздочкой</p>
+                        </div>
+                        <form id="item-form" class="item-form" novalidate>
+                            <label class="field">
+                                <span class="field-label">Что хочу *</span>
+                                <input id="item-input" name="text" type="text" required placeholder="Например, беспроводные наушники" autocomplete="off">
+                            </label>
+                            <label class="field">
+                                <span class="field-label">Ссылка</span>
+                                <input id="item-url" name="url" type="url" placeholder="https://пример.ру">
+                            </label>
+                            <label class="field">
+                                <span class="field-label">Заметка</span>
+                                <textarea id="item-note" name="note" rows="3" placeholder="Подсказки для себя или друзей"></textarea>
+                            </label>
+                            <div class="field-grid">
+                                <label class="field">
+                                    <span class="field-label">Приоритет</span>
+                                    <select id="item-priority" name="priority">
+                                        <option value="1">1 — можно подождать</option>
+                                        <option value="2">2</option>
+                                        <option value="3" selected>3 — было бы здорово</option>
+                                        <option value="4">4</option>
+                                        <option value="5">5 — очень хочу</option>
+                                    </select>
+                                </label>
+                                <label class="field">
+                                    <span class="field-label">Цена, ₽</span>
+                                    <input id="item-price" name="price" type="number" min="0" step="0.01" placeholder="0.00">
+                                </label>
+                            </div>
+                            <label class="field">
+                                <span class="field-label">Тег</span>
+                                <input id="item-tag" name="tag" type="text" placeholder="Например, отпуск">
+                            </label>
+                            <button id="add-item" type="submit" class="button button--primary button--full">Добавить</button>
+                        </form>
+                    </aside>
 
-        <div id="wishlist-section" style="display:none;">
-            <h2>Your Wishlist</h2>
-            <input id="item-input" placeholder="New item" />
-            <button id="add-item">Add</button>
-            <ul id="items"></ul>
-        </div>
-        <p id="app-version" class="app-version"></p>
+                    <section class="list-area" aria-labelledby="wishlist-title">
+                        <div class="list-header">
+                            <h2 id="wishlist-title">Мои желания</h2>
+                            <div class="filters" aria-label="Фильтры и сортировка">
+                                <label class="field field--compact">
+                                    <span class="sr-only">Поиск</span>
+                                    <input id="filter-search" type="search" placeholder="Поиск по названию и заметке" autocomplete="off">
+                                </label>
+                                <label class="field field--compact">
+                                    <span class="sr-only">Тег</span>
+                                    <select id="filter-tag">
+                                        <option value="all">Все теги</option>
+                                    </select>
+                                </label>
+                                <label class="field field--compact">
+                                    <span class="sr-only">Статус покупки</span>
+                                    <select id="filter-purchased">
+                                        <option value="all">Все статусы</option>
+                                        <option value="active">Нужно купить</option>
+                                        <option value="done">Уже куплено</option>
+                                    </select>
+                                </label>
+                                <label class="field field--compact">
+                                    <span class="sr-only">Сортировка</span>
+                                    <select id="sort-select">
+                                        <option value="manual">Сортировка: ручная</option>
+                                        <option value="createdDesc">Сначала новые</option>
+                                        <option value="priorityDesc">По приоритету</option>
+                                        <option value="priceAsc">Цена: по возрастанию</option>
+                                        <option value="priceDesc">Цена: по убыванию</option>
+                                    </select>
+                                </label>
+                            </div>
+                        </div>
+                        <p id="manual-hint" class="manual-hint">Перетягивайте карточки мышью или пальцем, чтобы менять порядок.</p>
+                        <div id="loading-state" class="skeleton-list" hidden>
+                            <div class="skeleton-card"></div>
+                            <div class="skeleton-card"></div>
+                            <div class="skeleton-card"></div>
+                        </div>
+                        <div id="empty-state" class="empty-state" hidden>
+                            <h3>Пока тут пусто</h3>
+                            <p>Добавьте первое желание, чтобы начать формировать список покупок.</p>
+                        </div>
+                        <ul id="items" class="items-list" aria-live="polite"></ul>
+                    </section>
+                </div>
+            </section>
+        </main>
     </div>
-    <!-- Load app as an ES module so we can import the modular Firebase SDK -->
     <script type="module" src="src/app.js?v=1.0.2"></script>
 </body>
 </html>

@@ -3,6 +3,7 @@ import { initializeApp } from 'https://www.gstatic.com/firebasejs/9.22.2/firebas
 import { getAuth, GoogleAuthProvider } from 'https://www.gstatic.com/firebasejs/9.22.2/firebase-auth.js';
 import { getFirestore } from 'https://www.gstatic.com/firebasejs/9.22.2/firebase-firestore.js';
 
+// Замените значения ниже рабочим конфигом вашего проекта Firebase перед деплоем.
 const firebaseConfig = {
   apiKey: "AIzaSyAGLAP1aQh9ZCTIYRz3y_wrPldnLEHssNQ",
   authDomain: "wishlist-962cf.firebaseapp.com",
