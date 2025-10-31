@@ -393,6 +393,7 @@ textarea {
 	display: grid;
 	grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
 	gap: 20px;
+	align-items: stretch;
 }
 
 .wish-card {
@@ -406,6 +407,14 @@ textarea {
 	border: 1px solid transparent;
 	box-shadow: var(--shadow-sm);
 	transition: transform var(--transition), box-shadow var(--transition), border var(--transition), background var(--transition);
+	height: 100%;
+}
+
+.wish-card__content {
+	display: flex;
+	flex-direction: column;
+	gap: 16px;
+	flex: 1;
 }
 
 .wish-card:hover,
@@ -475,6 +484,63 @@ textarea {
 	font-size: 13px;
 }
 
+.wish-card__prices {
+	display: flex;
+	align-items: center;
+	flex-wrap: wrap;
+	gap: 8px;
+}
+
+.price-chip {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	padding: 4px 10px;
+	border-radius: 999px;
+	font-size: 12px;
+	font-weight: 600;
+}
+
+.price-chip--manual {
+	background: rgba(79, 70, 229, 0.16);
+	color: var(--accent-hover);
+}
+
+.price-chip--remote {
+	background: rgba(16, 185, 129, 0.16);
+	color: var(--success);
+}
+
+.wish-card__media {
+	margin: 0;
+	border-radius: var(--radius-md);
+	overflow: hidden;
+	border: 1px solid var(--border);
+}
+
+.wish-card__image {
+	display: block;
+	width: 100%;
+	height: auto;
+	max-height: 220px;
+	object-fit: cover;
+}
+
+.wish-card__remote-title {
+	margin: 0;
+	font-weight: 600;
+	color: var(--text-primary);
+}
+
+.wish-card__remote-description {
+	margin: 0;
+	font-size: 14px;
+	color: var(--text-secondary);
+	white-space: pre-wrap;
+	max-height: 6.5rem;
+	overflow: hidden;
+}
+
 .wish-card__note {
 	margin: 0;
 	font-size: 14px;
@@ -486,6 +552,7 @@ textarea {
 	display: flex;
 	flex-wrap: wrap;
 	gap: 10px;
+	margin-top: auto;
 }
 
 .wish-card__link {

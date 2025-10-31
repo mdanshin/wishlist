@@ -43,6 +43,8 @@ const emptyState = document.getElementById('empty-state');
 const itemsList = document.getElementById('items');
 const appVersion = document.getElementById('app-version');
 
+const metadataCache = new Map();
+
 const filters = {
     search: '',
     tag: 'all',
@@ -55,6 +57,11 @@ let wishlistItems = [];
 let unsubscribeWishlist = null;
 let initialSnapshotPending = false;
 let draggedElement = null;
+const metadataUpdateQueue = new Map();
+const METADATA_TTL = 6 * 60 * 60 * 1000; // 6 часов
+// Прокси-сервис, который вытягивает Open Graph / JSON-LD данные по ссылке.
+// При production-развертывании замените на собственный бекенд или коммерческий API.
+const METADATA_ENDPOINT = 'https://wishlist-meta.onrender.com/metadata';
 
 if (appVersion) {
     appVersion.textContent = `Версия: ${APP_VERSION}`;
@@ -157,6 +164,7 @@ function subscribeToWishlist(uid) {
         (snapshot) => {
             const items = snapshot.docs.map((docSnap, index) => normalizeWishlistItem(docSnap.id, docSnap.data(), index));
             wishlistItems = items.slice().sort(sortByManualOrder);
+            scheduleMetadataEnrichment(uid, wishlistItems);
             ensureSequentialOrder(uid, wishlistItems).catch((err) => {
                 console.error('Не удалось синхронизировать порядок карточек', err);
             });
@@ -185,7 +193,13 @@ function normalizeWishlistItem(id, data = {}, fallbackIndex = 0) {
         tag: safeString(data.tag),
         order: safeNumber(data.order, fallbackIndex + 1),
         purchased: Boolean(data.purchased),
-        createdAt: safeString(data.createdAt) || new Date().toISOString()
+        createdAt: safeString(data.createdAt) || new Date().toISOString(),
+        imageUrl: safeString(data.imageUrl),
+        remoteTitle: safeString(data.remoteTitle),
+        remoteDescription: safeString(data.remoteDescription),
+        remotePrice: typeof data.remotePrice === 'number' && Number.isFinite(data.remotePrice) ? data.remotePrice : null,
+        remoteCurrency: safeString(data.remoteCurrency),
+        metadataFetchedAt: safeString(data.metadataFetchedAt)
     };
 }
 
@@ -213,6 +227,34 @@ async function ensureSequentialOrder(uid, items) {
     }
 }
 
+function scheduleMetadataEnrichment(uid, items) {
+    if (!uid || !items.length) return;
+    const now = Date.now();
+    items.forEach((item) => {
+        if (!item.url) return;
+        const lastFetched = item.metadataFetchedAt ? Number(new Date(item.metadataFetchedAt).getTime()) : 0;
+        const missingContent = !item.imageUrl && !item.remoteTitle && !item.remoteDescription && item.remotePrice === null;
+        const metadataStale = lastFetched ? now - lastFetched > METADATA_TTL : true;
+        const needsMetadata = !item.metadataFetchedAt || (missingContent && metadataStale);
+        if (!needsMetadata) return;
+        if (metadataUpdateQueue.has(item.id)) return;
+        metadataUpdateQueue.set(item.id, true);
+        fetchAndNormalizeMetadata(item.url)
+            .then(async (metadata) => {
+                if (!currentUser || currentUser.uid !== uid) return;
+                if (!metadata) return;
+                const docRef = doc(db, 'users', uid, 'wishlist', item.id);
+                await updateDoc(docRef, metadata);
+            })
+            .catch((err) => {
+                console.error('Не удалось обновить метаданные элемента', err);
+            })
+            .finally(() => {
+                metadataUpdateQueue.delete(item.id);
+            });
+    });
+}
+
 async function handleAddItem() {
     if (!currentUser) {
         alert('Сначала войдите в аккаунт.');
@@ -234,8 +276,21 @@ async function handleAddItem() {
         return;
     }
 
+    let metadataFields = createEmptyMetadata();
+    if (payload.url) {
+        setButtonBusy(addItemBtn, true, 'Получаем данные...');
+        try {
+            metadataFields = await fetchAndNormalizeMetadata(payload.url);
+        } catch (err) {
+            console.error('Не удалось получить дополнительные данные о товаре', err);
+        } finally {
+            setButtonBusy(addItemBtn, false);
+        }
+    }
+
     const newItem = {
         ...payload,
+        ...metadataFields,
         createdAt: new Date().toISOString(),
         order: getNextOrder(),
         purchased: false
@@ -313,7 +368,7 @@ function applyFiltersAndSort(items) {
 
     if (filters.search) {
         result = result.filter((item) => {
-            const haystack = `${item.text}\u0000${item.note}`.toLowerCase();
+            const haystack = `${item.text}\u0000${item.note}\u0000${item.remoteTitle || ''}\u0000${item.remoteDescription || ''}`.toLowerCase();
             return haystack.includes(filters.search.toLowerCase());
         });
     }
@@ -389,6 +444,9 @@ function createWishlistItemElement(item, allowDrag) {
         li.addEventListener('dragend', handleDragEnd);
     }
 
+    const content = document.createElement('div');
+    content.className = 'wish-card__content';
+
     const header = document.createElement('div');
     header.className = 'wish-card__header';
 
@@ -420,13 +478,39 @@ function createWishlistItemElement(item, allowDrag) {
     }
 
     header.appendChild(badgeContainer);
-    li.appendChild(header);
+    content.appendChild(header);
+
+    if (item.imageUrl) {
+        const media = document.createElement('figure');
+        media.className = 'wish-card__media';
+        const image = document.createElement('img');
+        image.className = 'wish-card__image';
+        image.src = item.imageUrl;
+        image.alt = item.remoteTitle || item.text;
+        image.loading = 'lazy';
+        media.appendChild(image);
+        content.appendChild(media);
+    }
+
+    if (item.remoteTitle && item.remoteTitle !== item.text) {
+        const remoteTitle = document.createElement('p');
+        remoteTitle.className = 'wish-card__remote-title';
+        remoteTitle.textContent = item.remoteTitle;
+        content.appendChild(remoteTitle);
+    }
+
+    if (item.remoteDescription) {
+        const remoteDescription = document.createElement('p');
+        remoteDescription.className = 'wish-card__remote-description';
+        remoteDescription.textContent = item.remoteDescription;
+        content.appendChild(remoteDescription);
+    }
 
     if (item.note) {
         const note = document.createElement('p');
         note.className = 'wish-card__note';
         note.textContent = item.note;
-        li.appendChild(note);
+        content.appendChild(note);
     }
 
     const meta = document.createElement('div');
@@ -435,13 +519,34 @@ function createWishlistItemElement(item, allowDrag) {
     dateSpan.textContent = `Добавлено: ${formatDate(item.createdAt)}`;
     meta.appendChild(dateSpan);
 
-    if (item.price !== null) {
-        const priceSpan = document.createElement('span');
-        priceSpan.textContent = `Цена: ${formatPrice(item.price)}`;
-        meta.appendChild(priceSpan);
+    if (item.metadataFetchedAt) {
+        const fetchedSpan = document.createElement('span');
+        fetchedSpan.textContent = `Данные обновлены: ${formatDate(item.metadataFetchedAt)}`;
+        meta.appendChild(fetchedSpan);
     }
 
-    li.appendChild(meta);
+    const pricesBlock = document.createElement('div');
+    pricesBlock.className = 'wish-card__prices';
+
+    if (item.price !== null) {
+        const manualPrice = document.createElement('span');
+        manualPrice.className = 'price-chip price-chip--manual';
+        manualPrice.textContent = `Моя оценка: ${formatPrice(item.price)}`;
+        pricesBlock.appendChild(manualPrice);
+    }
+
+    if (typeof item.remotePrice === 'number') {
+        const remotePrice = document.createElement('span');
+        remotePrice.className = 'price-chip price-chip--remote';
+        remotePrice.textContent = `По ссылке: ${formatPriceWithCurrency(item.remotePrice, item.remoteCurrency)}`;
+        pricesBlock.appendChild(remotePrice);
+    }
+
+    if (pricesBlock.children.length) {
+        meta.appendChild(pricesBlock);
+    }
+
+    content.appendChild(meta);
 
     if (item.url) {
         const link = document.createElement('a');
@@ -450,8 +555,10 @@ function createWishlistItemElement(item, allowDrag) {
         link.target = '_blank';
         link.rel = 'noopener noreferrer';
         link.textContent = 'Открыть ссылку';
-        li.appendChild(link);
+        content.appendChild(link);
     }
+
+    li.appendChild(content);
 
     const actions = document.createElement('div');
     actions.className = 'wish-card__actions';
@@ -571,6 +678,37 @@ function createEditForm(item, toggleButton) {
     saveBtn.className = 'button button--primary';
     saveBtn.textContent = 'Сохранить';
 
+    const refreshBtn = document.createElement('button');
+    refreshBtn.type = 'button';
+    refreshBtn.className = 'button button--subtle';
+    refreshBtn.textContent = 'Обновить данные';
+    refreshBtn.addEventListener('click', async () => {
+        const currentUrlValue = urlInput.value.trim();
+        if (!currentUrlValue) {
+            alert('Укажите ссылку, чтобы обновить данные по товару.');
+            return;
+        }
+        if (!isValidUrl(currentUrlValue)) {
+            alert('Пожалуйста, укажите корректную ссылку, начинающуюся с http или https.');
+            return;
+        }
+        if (!currentUser) {
+            alert('Сначала войдите в аккаунт.');
+            return;
+        }
+        setButtonBusy(refreshBtn, true, 'Обновляем...');
+        try {
+            const metadata = await fetchAndNormalizeMetadata(currentUrlValue, { force: true });
+            const docRef = doc(db, 'users', currentUser.uid, 'wishlist', item.id);
+            await updateDoc(docRef, metadata);
+        } catch (err) {
+            console.error('Не удалось обновить данные по ссылке', err);
+            alert('Не удалось обновить данные по ссылке: ' + err.message);
+        } finally {
+            setButtonBusy(refreshBtn, false);
+        }
+    });
+
     const cancelBtn = document.createElement('button');
     cancelBtn.type = 'button';
     cancelBtn.className = 'button button--ghost';
@@ -581,6 +719,7 @@ function createEditForm(item, toggleButton) {
     });
 
     actions.appendChild(saveBtn);
+    actions.appendChild(refreshBtn);
     actions.appendChild(cancelBtn);
     form.appendChild(actions);
 
@@ -640,10 +779,27 @@ async function handleEditSubmit({ form, saveButton, toggleButton, original }) {
         return;
     }
 
+    let metadataFields = null;
+    const urlChanged = (payload.url || '') !== (original.url || '');
+    if (urlChanged) {
+        if (payload.url) {
+            setButtonBusy(saveButton, true, 'Получаем данные...');
+            try {
+                metadataFields = await fetchAndNormalizeMetadata(payload.url, { force: true });
+            } catch (err) {
+                console.error('Не удалось обновить данные по ссылке', err);
+            } finally {
+                setButtonBusy(saveButton, false);
+            }
+        } else {
+            metadataFields = createEmptyMetadata();
+        }
+    }
+
     setButtonBusy(saveButton, true, 'Сохраняем...');
     try {
         const docRef = doc(db, 'users', currentUser.uid, 'wishlist', original.id);
-        await updateDoc(docRef, payload);
+        await updateDoc(docRef, metadataFields ? { ...payload, ...metadataFields } : payload);
         form.classList.remove('active');
         toggleButton.textContent = 'Редактировать';
     } catch (err) {
@@ -824,12 +980,86 @@ function formatPrice(value) {
     }
 }
 
+function formatPriceWithCurrency(value, currency) {
+    try {
+        if (currency) {
+            return new Intl.NumberFormat('ru-RU', {
+                style: 'currency',
+                currency,
+                maximumFractionDigits: 2
+            }).format(value);
+        }
+        return formatPrice(value);
+    } catch (err) {
+        return `${value} ${currency || '₽'}`.trim();
+    }
+}
+
+function normalizeRemotePrice(raw) {
+    if (typeof raw === 'number' && Number.isFinite(raw)) {
+        return Number(raw);
+    }
+    if (typeof raw === 'string') {
+        const sanitized = raw.replace(/[^0-9,\.]/g, '').replace(',', '.');
+        const parsed = Number.parseFloat(sanitized);
+        if (Number.isFinite(parsed)) {
+            return Number(parsed);
+        }
+    }
+    return null;
+}
+
 function isValidUrl(candidate) {
     try {
         const url = new URL(candidate);
         return url.protocol === 'http:' || url.protocol === 'https:';
     } catch (err) {
         return false;
+    }
+}
+
+function createEmptyMetadata(markAttempt = false) {
+    return {
+        imageUrl: '',
+        remoteTitle: '',
+        remoteDescription: '',
+        remotePrice: null,
+        remoteCurrency: '',
+        metadataFetchedAt: markAttempt ? new Date().toISOString() : ''
+    };
+}
+
+async function fetchAndNormalizeMetadata(url, options = {}) {
+    const { force = false } = options;
+    if (force) {
+        metadataCache.delete(url);
+    } else if (metadataCache.has(url)) {
+        return metadataCache.get(url);
+    }
+
+    try {
+        const response = await fetch(`${METADATA_ENDPOINT}?url=${encodeURIComponent(url)}`);
+        if (!response.ok) {
+            throw new Error(`Код ответа ${response.status}`);
+        }
+        const data = await response.json();
+        const normalizedPrice = normalizeRemotePrice(data.price);
+        const normalizedCurrency = typeof data.currency === 'string' ? data.currency.toUpperCase() : '';
+        const normalized = {
+            imageUrl: typeof data.image === 'string' ? data.image : '',
+            remoteTitle: typeof data.title === 'string' ? data.title : '',
+            remoteDescription: typeof data.description === 'string' ? data.description : '',
+            remotePrice: normalizedPrice,
+            remoteCurrency: normalizedCurrency,
+            metadataFetchedAt: new Date().toISOString()
+        };
+        metadataCache.set(url, normalized);
+        return normalized;
+    } catch (err) {
+        console.error('Сервис метаданных недоступен', err);
+        const fallback = createEmptyMetadata(true);
+        metadataCache.set(url, fallback);
+        return fallback;
     }
 }
 
