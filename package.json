@@ -1,0 +1,23 @@
+{
+  "name": "wishlist",
+  "version": "1.0.0",
+  "description": "A minimal wishlist application with Google authentication and Firebase integration.",
+  "main": "src/app.js",
+  "scripts": {
+    "start": "live-server .",
+    "build": "echo 'Build step not defined yet.'"
+  },
+  "dependencies": {
+    "firebase": "^9.0.0"
+  },
+  "devDependencies": {
+    "live-server": "^1.2.1"
+  },
+  "keywords": [
+    "wishlist",
+    "firebase",
+    "google-authentication"
+  ],
+  "author": "Your Name",
+  "license": "MIT"
+}
