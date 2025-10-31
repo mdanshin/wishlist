@@ -10,7 +10,8 @@ import {
     onSnapshot,
     updateDoc,
     deleteDoc,
-    writeBatch
+    writeBatch,
+    deleteField
 } from 'https://www.gstatic.com/firebasejs/9.22.2/firebase-firestore.js';
 
 const loginBtn = document.getElementById('login');
@@ -59,9 +60,49 @@ let initialSnapshotPending = false;
 let draggedElement = null;
 const metadataUpdateQueue = new Map();
 const METADATA_TTL = 6 * 60 * 60 * 1000; // 6 часов
-// CORS-дружественный прокси, возвращающий HTML-страницу как текст.
-// Для production лучше поднять собственный аналог или использовать платный API.
-const HTML_PROXY_PREFIX = 'https://r.jina.ai/';
+// Универсальный прокси, возвращающий HTML-страницу с корректными CORS заголовками.
+const HTML_PROXY_ENDPOINT = 'https://api.allorigins.win/get?url=';
+
+function setRuntimeMetadata(url, metadata) {
+    if (!url) return;
+    metadataCache.set(url, metadata);
+}
+
+function getRuntimeMetadata(url) {
+    if (!url) return null;
+    return metadataCache.get(url) || null;
+}
+
+function clearRuntimeMetadata(url) {
+    if (!url) return;
+    metadataCache.delete(url);
+}
+
+function buildPersistentMetadata(metadata, markAttempt = true) {
+    const timestamp = metadata?.metadataFetchedAt || (markAttempt ? new Date().toISOString() : '');
+    return {
+        remoteTitle: metadata?.remoteTitle || '',
+        remoteDescription: metadata?.remoteDescription || '',
+        remotePrice: typeof metadata?.remotePrice === 'number' && Number.isFinite(metadata.remotePrice) ? Number(metadata.remotePrice) : null,
+        remoteCurrency: metadata?.remoteCurrency || '',
+        metadataFetchedAt: timestamp
+    };
+}
+
+function createEmptyPersistentMetadata(markAttempt = false) {
+    return buildPersistentMetadata(null, markAttempt);
+}
+
+function createEmptyRuntimeMetadata(markAttempt = false) {
+    return {
+        imageUrl: '',
+        remoteTitle: '',
+        remoteDescription: '',
+        remotePrice: null,
+        remoteCurrency: '',
+        metadataFetchedAt: markAttempt ? new Date().toISOString() : ''
+    };
+}
 
 if (appVersion) {
     appVersion.textContent = `Версия: ${APP_VERSION}`;
@@ -232,19 +273,24 @@ function scheduleMetadataEnrichment(uid, items) {
     const now = Date.now();
     items.forEach((item) => {
         if (!item.url) return;
-        const lastFetched = item.metadataFetchedAt ? Number(new Date(item.metadataFetchedAt).getTime()) : 0;
-        const missingContent = !item.imageUrl && !item.remoteTitle && !item.remoteDescription && item.remotePrice === null;
-        const metadataStale = lastFetched ? now - lastFetched > METADATA_TTL : true;
-        const needsMetadata = !item.metadataFetchedAt || (missingContent && metadataStale);
+        const runtimeMetadata = getRuntimeMetadata(item.url);
+        const runtimeTimestamp = runtimeMetadata?.metadataFetchedAt ? Date.parse(runtimeMetadata.metadataFetchedAt) : NaN;
+        const runtimeFresh = Number.isFinite(runtimeTimestamp) && now - runtimeTimestamp <= METADATA_TTL;
+        const lastFetched = item.metadataFetchedAt ? Date.parse(item.metadataFetchedAt) : NaN;
+        const docFresh = Number.isFinite(lastFetched) && now - lastFetched <= METADATA_TTL;
+        const needsMetadata = !runtimeFresh || !docFresh || !item.metadataFetchedAt;
         if (!needsMetadata) return;
         if (metadataUpdateQueue.has(item.id)) return;
         metadataUpdateQueue.set(item.id, true);
         fetchAndNormalizeMetadata(item.url)
             .then(async (metadata) => {
-                if (!currentUser || currentUser.uid !== uid) return;
                 if (!metadata) return;
+                setRuntimeMetadata(item.url, metadata);
+                renderCurrentView();
+                if (!currentUser || currentUser.uid !== uid) return;
                 const docRef = doc(db, 'users', uid, 'wishlist', item.id);
-                await updateDoc(docRef, metadata);
+                const persistent = buildPersistentMetadata(metadata);
+                await updateDoc(docRef, { ...persistent, imageUrl: deleteField() });
             })
             .catch((err) => {
                 console.error('Не удалось обновить метаданные элемента', err);
@@ -276,11 +322,14 @@ async function handleAddItem() {
         return;
     }
 
-    let metadataFields = createEmptyMetadata();
+    let fetchedMetadata = null;
     if (payload.url) {
         setButtonBusy(addItemBtn, true, 'Получаем данные...');
         try {
-            metadataFields = await fetchAndNormalizeMetadata(payload.url);
+            fetchedMetadata = await fetchAndNormalizeMetadata(payload.url);
+            if (fetchedMetadata) {
+                setRuntimeMetadata(payload.url, fetchedMetadata);
+            }
         } catch (err) {
             console.error('Не удалось получить дополнительные данные о товаре', err);
         } finally {
@@ -290,7 +339,7 @@ async function handleAddItem() {
 
     const newItem = {
         ...payload,
-        ...metadataFields,
+        ...(fetchedMetadata ? buildPersistentMetadata(fetchedMetadata) : createEmptyPersistentMetadata()),
         createdAt: new Date().toISOString(),
         order: getNextOrder(),
         purchased: false
@@ -480,29 +529,33 @@ function createWishlistItemElement(item, allowDrag) {
     header.appendChild(badgeContainer);
     content.appendChild(header);
 
-    if (item.imageUrl) {
+    const runtimeMetadata = getRuntimeMetadata(item.url);
+    const imageSource = runtimeMetadata?.imageUrl || item.imageUrl;
+    if (imageSource) {
         const media = document.createElement('figure');
         media.className = 'wish-card__media';
         const image = document.createElement('img');
         image.className = 'wish-card__image';
-        image.src = item.imageUrl;
-        image.alt = item.remoteTitle || item.text;
+        image.src = imageSource;
+        image.alt = runtimeMetadata?.remoteTitle || item.remoteTitle || item.text;
         image.loading = 'lazy';
         media.appendChild(image);
         content.appendChild(media);
     }
 
-    if (item.remoteTitle && item.remoteTitle !== item.text) {
+    const resolvedRemoteTitle = (item.remoteTitle || runtimeMetadata?.remoteTitle || '').trim();
+    if (resolvedRemoteTitle && resolvedRemoteTitle !== item.text) {
         const remoteTitle = document.createElement('p');
         remoteTitle.className = 'wish-card__remote-title';
-        remoteTitle.textContent = item.remoteTitle;
+        remoteTitle.textContent = resolvedRemoteTitle;
         content.appendChild(remoteTitle);
     }
 
-    if (item.remoteDescription) {
+    const resolvedRemoteDescription = (item.remoteDescription || runtimeMetadata?.remoteDescription || '').trim();
+    if (resolvedRemoteDescription) {
         const remoteDescription = document.createElement('p');
         remoteDescription.className = 'wish-card__remote-description';
-        remoteDescription.textContent = item.remoteDescription;
+        remoteDescription.textContent = resolvedRemoteDescription;
         content.appendChild(remoteDescription);
     }
 
@@ -535,10 +588,13 @@ function createWishlistItemElement(item, allowDrag) {
         pricesBlock.appendChild(manualPrice);
     }
 
-    if (typeof item.remotePrice === 'number') {
+    const resolvedRemotePrice = typeof item.remotePrice === 'number' ? item.remotePrice : (typeof runtimeMetadata?.remotePrice === 'number' ? runtimeMetadata.remotePrice : null);
+    const resolvedRemoteCurrency = item.remoteCurrency || runtimeMetadata?.remoteCurrency || '';
+
+    if (typeof resolvedRemotePrice === 'number') {
         const remotePrice = document.createElement('span');
         remotePrice.className = 'price-chip price-chip--remote';
-        remotePrice.textContent = `По ссылке: ${formatPriceWithCurrency(item.remotePrice, item.remoteCurrency)}`;
+        remotePrice.textContent = `По ссылке: ${formatPriceWithCurrency(resolvedRemotePrice, resolvedRemoteCurrency)}`;
         pricesBlock.appendChild(remotePrice);
     }
 
@@ -699,8 +755,13 @@ function createEditForm(item, toggleButton) {
         setButtonBusy(refreshBtn, true, 'Обновляем...');
         try {
             const metadata = await fetchAndNormalizeMetadata(currentUrlValue, { force: true });
+            if (metadata) {
+                setRuntimeMetadata(currentUrlValue, metadata);
+                renderCurrentView();
+            }
             const docRef = doc(db, 'users', currentUser.uid, 'wishlist', item.id);
-            await updateDoc(docRef, metadata);
+            const persistent = buildPersistentMetadata(metadata);
+            await updateDoc(docRef, { ...persistent, imageUrl: deleteField() });
         } catch (err) {
             console.error('Не удалось обновить данные по ссылке', err);
             alert('Не удалось обновить данные по ссылке: ' + err.message);
@@ -782,24 +843,35 @@ async function handleEditSubmit({ form, saveButton, toggleButton, original }) {
     let metadataFields = null;
     const urlChanged = (payload.url || '') !== (original.url || '');
     if (urlChanged) {
+        clearRuntimeMetadata(original.url);
         if (payload.url) {
             setButtonBusy(saveButton, true, 'Получаем данные...');
             try {
-                metadataFields = await fetchAndNormalizeMetadata(payload.url, { force: true });
+                const fetched = await fetchAndNormalizeMetadata(payload.url, { force: true });
+                if (fetched) {
+                    setRuntimeMetadata(payload.url, fetched);
+                    metadataFields = buildPersistentMetadata(fetched);
+                    renderCurrentView();
+                } else {
+                    metadataFields = createEmptyPersistentMetadata();
+                }
             } catch (err) {
                 console.error('Не удалось обновить данные по ссылке', err);
+                metadataFields = createEmptyPersistentMetadata();
+                renderCurrentView();
             } finally {
                 setButtonBusy(saveButton, false);
             }
         } else {
-            metadataFields = createEmptyMetadata();
+            metadataFields = createEmptyPersistentMetadata();
         }
     }
 
     setButtonBusy(saveButton, true, 'Сохраняем...');
     try {
         const docRef = doc(db, 'users', currentUser.uid, 'wishlist', original.id);
-        await updateDoc(docRef, metadataFields ? { ...payload, ...metadataFields } : payload);
+        const updatePayload = metadataFields ? { ...payload, ...metadataFields } : payload;
+        await updateDoc(docRef, { ...updatePayload, imageUrl: deleteField() });
         form.classList.remove('active');
         toggleButton.textContent = 'Редактировать';
     } catch (err) {
@@ -832,6 +904,7 @@ async function handleDeleteItem(item) {
     const confirmed = confirm('Удалить это желание?');
     if (!confirmed) return;
     try {
+        clearRuntimeMetadata(item.url);
         const ref = doc(db, 'users', currentUser.uid, 'wishlist', item.id);
         await deleteDoc(ref);
     } catch (err) {
@@ -912,6 +985,8 @@ function cleanupAfterLogout() {
     unsubscribeWishlist = null;
     wishlistItems = [];
     initialSnapshotPending = false;
+    metadataCache.clear();
+    metadataUpdateQueue.clear();
     setAuthVisibility({ isLoggedIn: false });
     setLoadingState(false);
     filters.search = '';
@@ -1018,20 +1093,11 @@ function isValidUrl(candidate) {
     }
 }
 
-function createEmptyMetadata(markAttempt = false) {
-    return {
-        imageUrl: '',
-        remoteTitle: '',
-        remoteDescription: '',
-        remotePrice: null,
-        remoteCurrency: '',
-        metadataFetchedAt: markAttempt ? new Date().toISOString() : ''
-    };
-}
-
-function buildProxiedUrl(targetUrl) {
+function buildProxiedUrl(targetUrl, options = {}) {
     if (!targetUrl) return '';
-    return `${HTML_PROXY_PREFIX}${targetUrl}`;
+    const encodedUrl = encodeURIComponent(targetUrl);
+    const cacheBypass = options.disableCache ? `&disableCache=true&_=${Date.now()}` : '';
+    return `${HTML_PROXY_ENDPOINT}${encodedUrl}${cacheBypass}`;
 }
 
 function extractMetadataFromHtml(html, baseUrl) {
@@ -1092,7 +1158,7 @@ function extractMetadataFromHtml(html, baseUrl) {
         };
     } catch (err) {
         console.error('Не удалось распарсить HTML метаданных', err);
-        return createEmptyMetadata(true);
+        return createEmptyRuntimeMetadata(true);
     }
 }
 
@@ -1125,23 +1191,27 @@ async function fetchAndNormalizeMetadata(url, options = {}) {
     }
 
     try {
-        const proxiedUrl = buildProxiedUrl(url);
+        const proxiedUrl = buildProxiedUrl(url, { disableCache: force });
         const response = await fetch(proxiedUrl, {
             headers: {
-                Accept: 'text/html,application/xhtml+xml'
+                Accept: 'application/json'
             }
         });
         if (!response.ok) {
             throw new Error(`Код ответа ${response.status}`);
         }
-        const html = await response.text();
+        const payload = await response.json();
+        const html = typeof payload?.contents === 'string' ? payload.contents : '';
+        if (!html) {
+            throw new Error('Прокси вернул пустой ответ');
+        }
         const metadata = extractMetadataFromHtml(html, url);
-        metadataCache.set(url, metadata);
+        setRuntimeMetadata(url, metadata);
         return metadata;
     } catch (err) {
         console.error('Сервис метаданных недоступен', err);
-        const fallback = createEmptyMetadata(true);
-        metadataCache.set(url, fallback);
+        const fallback = createEmptyRuntimeMetadata(true);
+        setRuntimeMetadata(url, fallback);
         return fallback;
     }
 }
