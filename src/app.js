@@ -93,14 +93,16 @@ function createEmptyPersistentMetadata(markAttempt = false) {
     return buildPersistentMetadata(null, markAttempt);
 }
 
-function createEmptyRuntimeMetadata(markAttempt = false) {
+function createEmptyRuntimeMetadata(markAttempt = false, extras = {}) {
     return {
         imageUrl: '',
         remoteTitle: '',
         remoteDescription: '',
         remotePrice: null,
         remoteCurrency: '',
-        metadataFetchedAt: markAttempt ? new Date().toISOString() : ''
+        metadataFetchedAt: markAttempt ? new Date().toISOString() : '',
+        loading: false,
+        ...extras
     };
 }
 
@@ -281,6 +283,10 @@ function scheduleMetadataEnrichment(uid, items) {
         const needsMetadata = !runtimeFresh || !docFresh || !item.metadataFetchedAt;
         if (!needsMetadata) return;
         if (metadataUpdateQueue.has(item.id)) return;
+        if (!runtimeMetadata?.imageUrl) {
+            setRuntimeMetadata(item.url, createEmptyRuntimeMetadata(false, { loading: true }));
+            renderCurrentView();
+        }
         metadataUpdateQueue.set(item.id, true);
         fetchAndNormalizeMetadata(item.url)
             .then(async (metadata) => {
@@ -531,6 +537,7 @@ function createWishlistItemElement(item, allowDrag) {
 
     const runtimeMetadata = getRuntimeMetadata(item.url);
     const imageSource = runtimeMetadata?.imageUrl || item.imageUrl;
+    const isImageLoading = Boolean(runtimeMetadata?.loading) && !imageSource;
     if (imageSource) {
         const media = document.createElement('figure');
         media.className = 'wish-card__media';
@@ -541,6 +548,13 @@ function createWishlistItemElement(item, allowDrag) {
         image.loading = 'lazy';
         media.appendChild(image);
         content.appendChild(media);
+    } else if (isImageLoading) {
+        const skeleton = document.createElement('div');
+        skeleton.className = 'wish-card__media wish-card__media--skeleton';
+        const shimmer = document.createElement('div');
+        shimmer.className = 'wish-card__media-placeholder';
+        skeleton.appendChild(shimmer);
+        content.appendChild(skeleton);
     }
 
     const resolvedRemoteTitle = (item.remoteTitle || runtimeMetadata?.remoteTitle || '').trim();
@@ -752,6 +766,8 @@ function createEditForm(item, toggleButton) {
             alert('Сначала войдите в аккаунт.');
             return;
         }
+        setRuntimeMetadata(currentUrlValue, createEmptyRuntimeMetadata(false, { loading: true }));
+        renderCurrentView();
         setButtonBusy(refreshBtn, true, 'Обновляем...');
         try {
             const metadata = await fetchAndNormalizeMetadata(currentUrlValue, { force: true });
@@ -845,6 +861,8 @@ async function handleEditSubmit({ form, saveButton, toggleButton, original }) {
     if (urlChanged) {
         clearRuntimeMetadata(original.url);
         if (payload.url) {
+            setRuntimeMetadata(payload.url, createEmptyRuntimeMetadata(false, { loading: true }));
+            renderCurrentView();
             setButtonBusy(saveButton, true, 'Получаем данные...');
             try {
                 const fetched = await fetchAndNormalizeMetadata(payload.url, { force: true });
@@ -1154,7 +1172,8 @@ function extractMetadataFromHtml(html, baseUrl) {
             remoteDescription: description,
             remotePrice: normalizedPrice,
             remoteCurrency: normalizedCurrency,
-            metadataFetchedAt: new Date().toISOString()
+            metadataFetchedAt: new Date().toISOString(),
+            loading: false
         };
     } catch (err) {
         console.error('Не удалось распарсить HTML метаданных', err);
