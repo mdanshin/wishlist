@@ -60,8 +60,17 @@ let initialSnapshotPending = false;
 let draggedElement = null;
 const metadataUpdateQueue = new Map();
 const METADATA_TTL = 6 * 60 * 60 * 1000; // 6 часов
-// Универсальный прокси, возвращающий HTML-страницу с корректными CORS заголовками.
-const HTML_PROXY_ENDPOINT = 'https://api.allorigins.win/raw?url=';
+// Метаданные берем через Microlink (https://microlink.io) с поддержкой CORS.
+const METADATA_ENDPOINT = 'https://api.microlink.io/';
+const CURRENCY_SYMBOL_MAP = {
+    '₽': 'RUB',
+    '₴': 'UAH',
+    '₸': 'KZT',
+    '$': 'USD',
+    '€': 'EUR',
+    '£': 'GBP',
+    '¥': 'JPY'
+};
 
 function setRuntimeMetadata(url, metadata) {
     if (!url) return;
@@ -1093,13 +1102,29 @@ function normalizeRemotePrice(raw) {
         return Number(raw);
     }
     if (typeof raw === 'string') {
-    const sanitized = raw.replace(/[^0-9.,]/g, '').replace(/,/g, '.');
+        const sanitized = raw.replace(/[^0-9.,]/g, '').replace(/,/g, '.');
         const parsed = Number.parseFloat(sanitized);
         if (Number.isFinite(parsed)) {
             return Number(parsed);
         }
     }
     return null;
+}
+
+function normalizeCurrency(raw) {
+    if (typeof raw !== 'string') return '';
+    const trimmed = raw.trim();
+    if (!trimmed) return '';
+    if (CURRENCY_SYMBOL_MAP[trimmed]) {
+        return CURRENCY_SYMBOL_MAP[trimmed];
+    }
+    for (const [symbol, code] of Object.entries(CURRENCY_SYMBOL_MAP)) {
+        if (trimmed.includes(symbol)) {
+            return code;
+        }
+    }
+    const normalized = trimmed.replace(/[^A-Za-z]/g, '').toUpperCase();
+    return normalized.length ? normalized : '';
 }
 
 function isValidUrl(candidate) {
@@ -1111,74 +1136,146 @@ function isValidUrl(candidate) {
     }
 }
 
-function buildProxiedUrl(targetUrl, options = {}) {
+function buildMetadataRequestUrl(targetUrl, options = {}) {
     if (!targetUrl) return '';
-    const encodedUrl = encodeURIComponent(targetUrl);
-    const cacheBypass = options.disableCache ? `&disableCache=true&_=${Date.now()}` : '';
-    return `${HTML_PROXY_ENDPOINT}${encodedUrl}${cacheBypass}`;
+    const params = new URLSearchParams({
+        url: targetUrl,
+        audio: 'false',
+        video: 'false',
+        palette: 'false',
+        iframe: 'false'
+    });
+    if (options.disableCache) {
+        params.set('force', 'true');
+    }
+    return `${METADATA_ENDPOINT}?${params.toString()}`;
 }
 
-function extractMetadataFromHtml(html, baseUrl) {
-    try {
-        const parser = new DOMParser();
-        const doc = parser.parseFromString(html, 'text/html');
+function pickFirstTruthy(...values) {
+    for (const value of values) {
+        if (typeof value === 'string' && value.trim()) {
+            return value.trim();
+        }
+    }
+    return '';
+}
 
-        const pick = (...selectors) => {
-            for (const selector of selectors) {
-                const el = doc.querySelector(selector);
-                const value = el?.getAttribute('content') || el?.textContent;
-                if (value) return value.trim();
-            }
-            return '';
-        };
+function pickFirstPriceCandidate(...values) {
+    for (const value of values) {
+        if (typeof value === 'number' && Number.isFinite(value)) {
+            return value;
+        }
+        if (typeof value === 'string' && value.trim()) {
+            return value.trim();
+        }
+    }
+    return null;
+}
 
-        const rawImage = pick(
-            'meta[property="og:image"]',
-            'meta[name="twitter:image"]',
-            'meta[itemprop="image"]'
+function normalizeMicrolinkPrice(candidate) {
+    if (!candidate) return null;
+    if (typeof candidate === 'string' || typeof candidate === 'number') {
+        const normalized = normalizeRemotePrice(candidate);
+        if (normalized !== null) {
+            return {
+                value: normalized,
+                currency: typeof candidate === 'string' ? normalizeCurrency(candidate) : ''
+            };
+        }
+        return null;
+    }
+
+    if (typeof candidate === 'object') {
+        const potentialValue = pickFirstPriceCandidate(
+            candidate.value,
+            candidate.amount,
+            candidate.price,
+            candidate.current,
+            candidate.text
         );
-        const imageUrl = resolveUrl(rawImage, baseUrl);
-
-        const title = pick(
-            'meta[property="og:title"]',
-            'meta[name="twitter:title"]',
-            'meta[name="title"]',
-            'title'
-        );
-
-        const description = pick(
-            'meta[property="og:description"]',
-            'meta[name="twitter:description"]',
-            'meta[name="description"]'
-        );
-
-        const rawPrice = pick(
-            'meta[property="product:price:amount"]',
-            'meta[itemprop="price"]',
-            'meta[name="twitter:data1"]'
-        );
-        const rawCurrency = pick(
-            'meta[property="product:price:currency"]',
-            'meta[itemprop="priceCurrency"]',
-            'meta[name="twitter:label1"]'
-        );
-
-        const normalizedPrice = normalizeRemotePrice(rawPrice);
-        const normalizedCurrency = typeof rawCurrency === 'string' ? rawCurrency.replace(/[^A-Za-z]/g, '').toUpperCase() : '';
-
+        const normalized = normalizeRemotePrice(potentialValue ?? '');
+        if (normalized === null) return null;
+        const currencySource = typeof candidate.currency === 'string'
+            ? candidate.currency
+            : typeof candidate.currencyCode === 'string'
+            ? candidate.currencyCode
+            : typeof candidate.symbol === 'string'
+            ? candidate.symbol
+            : '';
+        const currency = normalizeCurrency(currencySource) || (typeof potentialValue === 'string' ? normalizeCurrency(potentialValue) : '');
         return {
-            imageUrl,
-            remoteTitle: title,
-            remoteDescription: description,
-            remotePrice: normalizedPrice,
-            remoteCurrency: normalizedCurrency,
-            metadataFetchedAt: new Date().toISOString(),
-            loading: false
+            value: normalized,
+            currency
         };
-    } catch (err) {
-        console.error('Не удалось распарсить HTML метаданных', err);
+    }
+
+    return null;
+}
+
+function collectMicrolinkPrices(data) {
+    const primaryOffer = Array.isArray(data.product?.offers) ? data.product.offers[0] : data.product?.offers;
+    const primaryProduct = Array.isArray(data.products) ? data.products[0] : data.products;
+    const primaryPrices = Array.isArray(data.prices) ? data.prices : [data.prices];
+
+    const candidates = [
+        data.price,
+        data.product?.price,
+        primaryOffer?.price,
+        primaryOffer,
+        primaryProduct?.price,
+        primaryProduct,
+        ...primaryPrices.filter(Boolean),
+        data.meta?.price,
+        data.meta?.product?.price
+    ];
+
+    for (const candidate of candidates) {
+        const parsed = normalizeMicrolinkPrice(candidate);
+        if (parsed) return parsed;
+    }
+
+    return null;
+}
+
+function extractMetadataFromMicrolink(data, baseUrl) {
+    if (!data || typeof data !== 'object') {
         return createEmptyRuntimeMetadata(true);
     }
+
+    const rawImage = pickFirstTruthy(
+        data.image?.url,
+        data.image,
+        data.logo?.url,
+        data.logo,
+        data.thumbnail?.url,
+        data.thumbnail
+    );
+
+    const imageUrl = sanitizeRemoteImageUrl(resolveUrl(rawImage, baseUrl));
+    const remoteTitle = pickFirstTruthy(
+        data.title,
+        data.publisher,
+        data.site?.title,
+        data.author,
+        data.owner
+    );
+    const remoteDescription = pickFirstTruthy(
+        data.description,
+        data.excerpt,
+        data.summary
+    );
+
+    const priceInfo = collectMicrolinkPrices(data);
+
+    return {
+        imageUrl,
+        remoteTitle,
+        remoteDescription,
+        remotePrice: priceInfo?.value ?? null,
+        remoteCurrency: priceInfo?.currency ?? '',
+        metadataFetchedAt: new Date().toISOString(),
+        loading: false
+    };
 }
 
 function resolveUrl(candidate, base) {
@@ -1188,6 +1285,17 @@ function resolveUrl(candidate, base) {
     } catch (err) {
         return '';
     }
+}
+
+function sanitizeRemoteImageUrl(url) {
+    if (!url) return '';
+    const blockedPatterns = [
+        'abt-complaints/static/v1/img/warn.png'
+    ];
+    if (blockedPatterns.some((pattern) => url.includes(pattern))) {
+        return '';
+    }
+    return url;
 }
 
 async function fetchAndNormalizeMetadata(url, options = {}) {
@@ -1210,17 +1318,20 @@ async function fetchAndNormalizeMetadata(url, options = {}) {
     }
 
     try {
-        const proxiedUrl = buildProxiedUrl(url, { disableCache: force });
-        const response = await fetch(proxiedUrl, {
+        const requestUrl = buildMetadataRequestUrl(url, { disableCache: force });
+        const response = await fetch(requestUrl, {
             headers: {
-                Accept: 'text/html,application/xhtml+xml'
+                Accept: 'application/json'
             }
         });
         if (!response.ok) {
             throw new Error(`Код ответа ${response.status}`);
         }
-        const html = await response.text();
-        const metadata = extractMetadataFromHtml(html, url);
+        const payload = await response.json();
+        if (!payload || payload.status !== 'success' || !payload.data) {
+            throw new Error('Сервис вернул некорректные данные');
+        }
+        const metadata = extractMetadataFromMicrolink(payload.data, url);
         setRuntimeMetadata(url, metadata);
         return metadata;
     } catch (err) {
