@@ -1,4 +1,5 @@
 import { auth, provider, db } from './firebase.js';
+import { APP_VERSION } from './version.js';
 import { signInWithPopup, signOut, onAuthStateChanged } from 'https://www.gstatic.com/firebasejs/9.22.2/firebase-auth.js';
 import { doc, getDoc, setDoc, collection, addDoc, getDocs } from 'https://www.gstatic.com/firebasejs/9.22.2/firebase-firestore.js';
 
@@ -11,6 +12,11 @@ const wishlistSection = document.getElementById('wishlist-section');
 const itemInput = document.getElementById('item-input');
 const addItemBtn = document.getElementById('add-item');
 const itemsList = document.getElementById('items');
+const appVersion = document.getElementById('app-version');
+
+if (appVersion) {
+    appVersion.textContent = `Версия: ${APP_VERSION}`;
+}
 
 loginBtn.addEventListener('click', async () => {
     try {

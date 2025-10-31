@@ -18,5 +18,6 @@
 - **Testing**: No automated tests. Manual verification is via live browser session; document reproducible steps when adding logic.
 - **Common tasks**: For a new Firestore field, update both the `setDoc` payload and the read loop. For new user actions, bind events after DOM query at top of file.
 - **Deployment**: Проект публикуется на GitHub Pages: рассчитывай только на статические файлы, используй относительные пути, не полагайся на серверные API и учитывай ограничения по env-переменным.
+- **Версионность**: Повышай версию через `npm version <level>` — скрипт `sync-version` автоматически пропишет query-параметры `?v=...` в `index.html` и обновит `src/version.js`, чтобы браузер не кешировал старые сборки. После команды не забудь закоммитить изменённые файлы.
 - **Pitfalls**: Duplicate `initializeApp` calls in `src/firebase.js` will break auth; remove unused blocks when adjusting the config. Missing Firebase config will throw at runtime—guard or document setup expectations.
 - **When in doubt**: Compare against `src/app.js` for data flow and `index.html` for structure before introducing new components. Prefer incremental DOM updates over framework-level rewrites.

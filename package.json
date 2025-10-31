@@ -5,7 +5,9 @@
   "main": "src/app.js",
   "scripts": {
     "start": "live-server .",
-    "build": "echo 'Build step not defined yet.'"
+    "build": "echo 'Build step not defined yet.'",
+    "sync-version": "node scripts/sync-version.mjs",
+    "version": "npm run sync-version && git add index.html src/version.js"
   },
   "dependencies": {
     "firebase": "^9.0.0"
