@@ -59,9 +59,9 @@ let initialSnapshotPending = false;
 let draggedElement = null;
 const metadataUpdateQueue = new Map();
 const METADATA_TTL = 6 * 60 * 60 * 1000; // 6 часов
-// Прокси-сервис, который вытягивает Open Graph / JSON-LD данные по ссылке.
-// При production-развертывании замените на собственный бекенд или коммерческий API.
-const METADATA_ENDPOINT = 'https://wishlist-meta.onrender.com/metadata';
+// CORS-дружественный прокси, возвращающий HTML-страницу как текст.
+// Для production лучше поднять собственный аналог или использовать платный API.
+const HTML_PROXY_PREFIX = 'https://r.jina.ai/';
 
 if (appVersion) {
     appVersion.textContent = `Версия: ${APP_VERSION}`;
@@ -1000,7 +1000,7 @@ function normalizeRemotePrice(raw) {
         return Number(raw);
     }
     if (typeof raw === 'string') {
-        const sanitized = raw.replace(/[^0-9,\.]/g, '').replace(',', '.');
+    const sanitized = raw.replace(/[^0-9.,]/g, '').replace(/,/g, '.');
         const parsed = Number.parseFloat(sanitized);
         if (Number.isFinite(parsed)) {
             return Number(parsed);
@@ -1029,32 +1029,115 @@ function createEmptyMetadata(markAttempt = false) {
     };
 }
 
+function buildProxiedUrl(targetUrl) {
+    if (!targetUrl) return '';
+    return `${HTML_PROXY_PREFIX}${targetUrl}`;
+}
+
+function extractMetadataFromHtml(html, baseUrl) {
+    try {
+        const parser = new DOMParser();
+        const doc = parser.parseFromString(html, 'text/html');
+
+        const pick = (...selectors) => {
+            for (const selector of selectors) {
+                const el = doc.querySelector(selector);
+                const value = el?.getAttribute('content') || el?.textContent;
+                if (value) return value.trim();
+            }
+            return '';
+        };
+
+        const rawImage = pick(
+            'meta[property="og:image"]',
+            'meta[name="twitter:image"]',
+            'meta[itemprop="image"]'
+        );
+        const imageUrl = resolveUrl(rawImage, baseUrl);
+
+        const title = pick(
+            'meta[property="og:title"]',
+            'meta[name="twitter:title"]',
+            'meta[name="title"]',
+            'title'
+        );
+
+        const description = pick(
+            'meta[property="og:description"]',
+            'meta[name="twitter:description"]',
+            'meta[name="description"]'
+        );
+
+        const rawPrice = pick(
+            'meta[property="product:price:amount"]',
+            'meta[itemprop="price"]',
+            'meta[name="twitter:data1"]'
+        );
+        const rawCurrency = pick(
+            'meta[property="product:price:currency"]',
+            'meta[itemprop="priceCurrency"]',
+            'meta[name="twitter:label1"]'
+        );
+
+        const normalizedPrice = normalizeRemotePrice(rawPrice);
+        const normalizedCurrency = typeof rawCurrency === 'string' ? rawCurrency.replace(/[^A-Za-z]/g, '').toUpperCase() : '';
+
+        return {
+            imageUrl,
+            remoteTitle: title,
+            remoteDescription: description,
+            remotePrice: normalizedPrice,
+            remoteCurrency: normalizedCurrency,
+            metadataFetchedAt: new Date().toISOString()
+        };
+    } catch (err) {
+        console.error('Не удалось распарсить HTML метаданных', err);
+        return createEmptyMetadata(true);
+    }
+}
+
+function resolveUrl(candidate, base) {
+    if (!candidate) return '';
+    try {
+        return new URL(candidate, base).toString();
+    } catch (err) {
+        return '';
+    }
+}
+
 async function fetchAndNormalizeMetadata(url, options = {}) {
     const { force = false } = options;
     if (force) {
         metadataCache.delete(url);
     } else if (metadataCache.has(url)) {
-        return metadataCache.get(url);
+        const cached = metadataCache.get(url);
+        if (!cached?.metadataFetchedAt) {
+            return cached;
+        }
+        const cachedTimestamp = Date.parse(cached.metadataFetchedAt);
+        if (!Number.isNaN(cachedTimestamp)) {
+            const age = Date.now() - cachedTimestamp;
+            if (age <= METADATA_TTL) {
+                return cached;
+            }
+        }
+        metadataCache.delete(url);
     }
 
     try {
-        const response = await fetch(`${METADATA_ENDPOINT}?url=${encodeURIComponent(url)}`);
+        const proxiedUrl = buildProxiedUrl(url);
+        const response = await fetch(proxiedUrl, {
+            headers: {
+                Accept: 'text/html,application/xhtml+xml'
+            }
+        });
         if (!response.ok) {
             throw new Error(`Код ответа ${response.status}`);
         }
-        const data = await response.json();
-        const normalizedPrice = normalizeRemotePrice(data.price);
-        const normalizedCurrency = typeof data.currency === 'string' ? data.currency.toUpperCase() : '';
-        const normalized = {
-            imageUrl: typeof data.image === 'string' ? data.image : '',
-            remoteTitle: typeof data.title === 'string' ? data.title : '',
-            remoteDescription: typeof data.description === 'string' ? data.description : '',
-            remotePrice: normalizedPrice,
-            remoteCurrency: normalizedCurrency,
-            metadataFetchedAt: new Date().toISOString()
-        };
-        metadataCache.set(url, normalized);
-        return normalized;
+        const html = await response.text();
+        const metadata = extractMetadataFromHtml(html, url);
+        metadataCache.set(url, metadata);
+        return metadata;
     } catch (err) {
         console.error('Сервис метаданных недоступен', err);
         const fallback = createEmptyMetadata(true);
