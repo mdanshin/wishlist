@@ -554,6 +554,16 @@ textarea {
 	overflow: hidden;
 }
 
+.wish-card__metadata-warning {
+	margin: 8px 0 0;
+	padding: 10px 12px;
+	border-radius: var(--radius-md);
+	background: rgba(99, 102, 241, 0.12);
+	color: var(--accent-hover);
+	font-size: 13px;
+	line-height: 1.5;
+}
+
 .wish-card__note {
 	margin: 0;
 	font-size: 14px;

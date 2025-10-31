@@ -71,6 +71,15 @@ const CURRENCY_SYMBOL_MAP = {
     '£': 'GBP',
     '¥': 'JPY'
 };
+const BLOCKED_METADATA_PATTERNS = [
+    /antibot/i,
+    /challenge page/i,
+    /access denied/i,
+    /just a moment/i,
+    /verification required/i,
+    /forbidden/i
+];
+const OZON_DOMAIN_PATTERN = /(?:^|\.)ozon\.ru/i;
 
 function setRuntimeMetadata(url, metadata) {
     if (!url) return;
@@ -547,6 +556,8 @@ function createWishlistItemElement(item, allowDrag) {
     const runtimeMetadata = getRuntimeMetadata(item.url);
     const imageSource = runtimeMetadata?.imageUrl || item.imageUrl;
     const isImageLoading = Boolean(runtimeMetadata?.loading) && !imageSource;
+    const persistedBlocked = containsBlockedMarker(item.remoteTitle) || containsBlockedMarker(item.remoteDescription);
+    const metadataBlocked = Boolean(runtimeMetadata?.blocked) || persistedBlocked;
     if (imageSource) {
         const media = document.createElement('figure');
         media.className = 'wish-card__media';
@@ -566,20 +577,31 @@ function createWishlistItemElement(item, allowDrag) {
         content.appendChild(skeleton);
     }
 
-    const resolvedRemoteTitle = (item.remoteTitle || runtimeMetadata?.remoteTitle || '').trim();
-    if (resolvedRemoteTitle && resolvedRemoteTitle !== item.text) {
+    const resolvedRemoteTitle = [runtimeMetadata?.remoteTitle, item.remoteTitle]
+        .map((value) => sanitizeRemoteText(value))
+        .find((title) => title && title !== item.text) || '';
+    if (resolvedRemoteTitle) {
         const remoteTitle = document.createElement('p');
         remoteTitle.className = 'wish-card__remote-title';
         remoteTitle.textContent = resolvedRemoteTitle;
         content.appendChild(remoteTitle);
     }
 
-    const resolvedRemoteDescription = (item.remoteDescription || runtimeMetadata?.remoteDescription || '').trim();
+    const resolvedRemoteDescription = [runtimeMetadata?.remoteDescription, item.remoteDescription]
+        .map((value) => sanitizeRemoteText(value))
+        .find(Boolean) || '';
     if (resolvedRemoteDescription) {
         const remoteDescription = document.createElement('p');
         remoteDescription.className = 'wish-card__remote-description';
         remoteDescription.textContent = resolvedRemoteDescription;
         content.appendChild(remoteDescription);
+    }
+
+    if (metadataBlocked) {
+        const warning = document.createElement('p');
+        warning.className = 'wish-card__metadata-warning';
+        warning.textContent = getBlockedMetadataMessage(item.url);
+        content.appendChild(warning);
     }
 
     if (item.note) {
@@ -1252,17 +1274,30 @@ function extractMetadataFromMicrolink(data, baseUrl) {
     );
 
     const imageUrl = sanitizeRemoteImageUrl(resolveUrl(rawImage, baseUrl));
-    const remoteTitle = pickFirstTruthy(
-        data.title,
-        data.publisher,
-        data.site?.title,
-        data.author,
-        data.owner
+
+    if (isMicrolinkBlocked(data, imageUrl, baseUrl)) {
+        const reason = baseUrl && OZON_DOMAIN_PATTERN.test(baseUrl) ? 'ozon' : 'remote_protection';
+        return createEmptyRuntimeMetadata(true, {
+            blocked: true,
+            blockedReason: reason
+        });
+    }
+
+    const remoteTitle = sanitizeRemoteText(
+        pickFirstTruthy(
+            data.title,
+            data.publisher,
+            data.site?.title,
+            data.author,
+            data.owner
+        )
     );
-    const remoteDescription = pickFirstTruthy(
-        data.description,
-        data.excerpt,
-        data.summary
+    const remoteDescription = sanitizeRemoteText(
+        pickFirstTruthy(
+            data.description,
+            data.excerpt,
+            data.summary
+        )
     );
 
     const priceInfo = collectMicrolinkPrices(data);
@@ -1296,6 +1331,53 @@ function sanitizeRemoteImageUrl(url) {
         return '';
     }
     return url;
+}
+
+function containsBlockedMarker(value) {
+    if (typeof value !== 'string') return false;
+    return BLOCKED_METADATA_PATTERNS.some((pattern) => pattern.test(value));
+}
+
+function isMicrolinkBlocked(data, imageUrl, originalUrl) {
+    const textCandidates = [
+        data?.title,
+        data?.description,
+        data?.excerpt,
+        data?.summary,
+        data?.url,
+        data?.content,
+        data?.author,
+        data?.publisher
+    ];
+
+    if (textCandidates.some(containsBlockedMarker)) {
+        return true;
+    }
+
+    if (originalUrl && OZON_DOMAIN_PATTERN.test(originalUrl)) {
+        if (!imageUrl) {
+            return true;
+        }
+        if (textCandidates.some((value) => typeof value === 'string' && /fab_chlg/i.test(value))) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+function sanitizeRemoteText(value) {
+    if (containsBlockedMarker(value)) {
+        return '';
+    }
+    return typeof value === 'string' ? value.trim() : '';
+}
+
+function getBlockedMetadataMessage(url) {
+    if (url && OZON_DOMAIN_PATTERN.test(url)) {
+        return 'OZON защищает карточки от автоматического сбора данных. Откройте ссылку, чтобы увидеть товар.';
+    }
+    return 'Магазин ограничивает автоматическую загрузку данных. Откройте ссылку вручную.';
 }
 
 async function fetchAndNormalizeMetadata(url, options = {}) {
