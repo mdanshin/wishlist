@@ -5,22 +5,31 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Wishlist</title>
     <link rel="stylesheet" href="src/styles.css">
-    <script src="https://www.gstatic.com/firebasejs/9.6.1/firebase-app.js"></script>
-    <script src="https://www.gstatic.com/firebasejs/9.6.1/firebase-auth.js"></script>
-    <script src="https://www.gstatic.com/firebasejs/9.6.1/firebase-firestore.js"></script>
-    <script src="https://apis.google.com/js/platform.js" async defer></script>
-    <script src="src/app.js" defer></script>
 </head>
 <body>
     <div id="app">
-        <h1>Welcome to Your Wishlist</h1>
-        <button id="login">Login with Google</button>
-        <button id="logout" style="display:none;">Logout</button>
+        <h1>Wishlist</h1>
+
+        <div id="auth">
+            <button id="login">Login with Google</button>
+            <button id="logout" style="display:none;">Logout</button>
+        </div>
+
         <div id="user-info" style="display:none;">
             <h2>User Info</h2>
             <p id="user-name"></p>
             <p id="user-email"></p>
         </div>
+
+        <div id="wishlist-section" style="display:none;">
+            <h2>Your Wishlist</h2>
+            <input id="item-input" placeholder="New item" />
+            <button id="add-item">Add</button>
+            <ul id="items"></ul>
+        </div>
     </div>
+</body>
+    <!-- Load app as an ES module so we can import the modular Firebase SDK -->
+    <script type="module" src="src/app.js"></script>
 </body>
 </html>

@@ -1,43 +1,6 @@
-body {
-    font-family: Arial, sans-serif;
-    margin: 0;
-    padding: 0;
-    background-color: #f4f4f4;
-}
-
-header {
-    background: #35424a;
-    color: #ffffff;
-    padding: 10px 0;
-    text-align: center;
-}
-
-h1 {
-    margin: 0;
-}
-
-.container {
-    width: 80%;
-    margin: auto;
-    overflow: hidden;
-}
-
-button {
-    background: #35424a;
-    color: #ffffff;
-    border: none;
-    padding: 10px 20px;
-    cursor: pointer;
-}
-
-button:hover {
-    background: #45a049;
-}
-
-.user-info {
-    margin: 20px 0;
-    padding: 10px;
-    background: #ffffff;
-    border-radius: 5px;
-    box-shadow: 0 0 10px rgba(0, 0, 0, 0.1);
-}
+/* minimal styles */
+body { font-family: Arial, sans-serif; padding: 16px; }
+button { margin: 4px; }
+#items { margin-top: 8px; }
+#app { max-width: 600px; margin: 0 auto; }
+input { padding: 6px; margin-right: 6px; }
