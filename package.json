@@ -1,6 +1,6 @@
 {
   "name": "wishlist",
-  "version": "0.0.4",
+  "version": "0.0.5",
   "description": "A minimal wishlist application with Google authentication and Firebase integration.",
   "main": "src/app.js",
   "scripts": {
