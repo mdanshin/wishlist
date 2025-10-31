@@ -62,6 +62,8 @@ const metadataUpdateQueue = new Map();
 const METADATA_TTL = 6 * 60 * 60 * 1000; // 6 часов
 // Метаданные берем через Microlink (https://microlink.io) с поддержкой CORS.
 const METADATA_ENDPOINT = 'https://api.microlink.io/';
+// Запасной вариант — AllOrigins с HTML для разбора метатегов.
+const HTML_PROXY_ENDPOINT = 'https://api.allorigins.win/raw?url=';
 const CURRENCY_SYMBOL_MAP = {
     '₽': 'RUB',
     '₴': 'UAH',
@@ -557,6 +559,7 @@ function createWishlistItemElement(item, allowDrag) {
     const imageSource = runtimeMetadata?.imageUrl || item.imageUrl;
     const isImageLoading = Boolean(runtimeMetadata?.loading) && !imageSource;
     const persistedBlocked = containsBlockedMarker(item.remoteTitle) || containsBlockedMarker(item.remoteDescription);
+    const blockedReason = runtimeMetadata?.blockedReason;
     const metadataBlocked = Boolean(runtimeMetadata?.blocked) || persistedBlocked;
     if (imageSource) {
         const media = document.createElement('figure');
@@ -600,7 +603,7 @@ function createWishlistItemElement(item, allowDrag) {
     if (metadataBlocked) {
         const warning = document.createElement('p');
         warning.className = 'wish-card__metadata-warning';
-        warning.textContent = getBlockedMetadataMessage(item.url);
+        warning.textContent = getBlockedMetadataMessage(item.url, blockedReason);
         content.appendChild(warning);
     }
 
@@ -1173,6 +1176,13 @@ function buildMetadataRequestUrl(targetUrl, options = {}) {
     return `${METADATA_ENDPOINT}?${params.toString()}`;
 }
 
+function buildHtmlProxyUrl(targetUrl, options = {}) {
+    if (!targetUrl) return '';
+    const encodedUrl = encodeURIComponent(targetUrl);
+    const cacheBypass = options.disableCache ? `&disableCache=true&_=${Date.now()}` : '';
+    return `${HTML_PROXY_ENDPOINT}${encodedUrl}${cacheBypass}`;
+}
+
 function pickFirstTruthy(...values) {
     for (const value of values) {
         if (typeof value === 'string' && value.trim()) {
@@ -1373,11 +1383,241 @@ function sanitizeRemoteText(value) {
     return typeof value === 'string' ? value.trim() : '';
 }
 
-function getBlockedMetadataMessage(url) {
-    if (url && OZON_DOMAIN_PATTERN.test(url)) {
+function getBlockedMetadataMessage(url, reason) {
+    if (reason === 'ozon' || (url && OZON_DOMAIN_PATTERN.test(url))) {
         return 'OZON защищает карточки от автоматического сбора данных. Откройте ссылку, чтобы увидеть товар.';
     }
     return 'Магазин ограничивает автоматическую загрузку данных. Откройте ссылку вручную.';
+}
+
+function shouldFallbackToHtml(metadata) {
+    if (!metadata || metadata.blocked) return false;
+    const hasPrice = typeof metadata.remotePrice === 'number' && Number.isFinite(metadata.remotePrice);
+    return !hasPrice;
+}
+
+function mergeMetadata(primary, secondary) {
+    if (!primary) return secondary;
+    if (!secondary) return primary;
+    const merged = {
+        ...primary,
+        imageUrl: primary.imageUrl || secondary.imageUrl,
+        remoteTitle: primary.remoteTitle || secondary.remoteTitle,
+        remoteDescription: primary.remoteDescription || secondary.remoteDescription,
+        remotePrice:
+            typeof primary.remotePrice === 'number' && Number.isFinite(primary.remotePrice)
+                ? primary.remotePrice
+                : secondary.remotePrice,
+        remoteCurrency: primary.remoteCurrency || secondary.remoteCurrency
+    };
+    return merged;
+}
+
+function extractMetadataFromHtml(html, baseUrl) {
+    if (typeof html !== 'string' || !html.trim()) {
+        return null;
+    }
+
+    try {
+        const parser = new DOMParser();
+        const doc = parser.parseFromString(html, 'text/html');
+
+        const bodyText = doc.body?.textContent || '';
+        if (containsBlockedMarker(bodyText)) {
+            const reason = baseUrl && OZON_DOMAIN_PATTERN.test(baseUrl) ? 'ozon' : 'remote_protection';
+            return createEmptyRuntimeMetadata(true, {
+                blocked: true,
+                blockedReason: reason
+            });
+        }
+
+        const pick = (...selectors) => {
+            for (const selector of selectors) {
+                const element = doc.querySelector(selector);
+                if (!element) continue;
+                const value = element.getAttribute('content') ?? element.getAttribute('value') ?? element.textContent;
+                if (typeof value === 'string' && value.trim()) {
+                    return value.trim();
+                }
+            }
+            return '';
+        };
+
+        const rawImage = pick(
+            'meta[property="og:image"]',
+            'meta[name="twitter:image"]',
+            'meta[itemprop="image"]',
+            'meta[property="og:image:secure_url"]'
+        );
+        const imageUrl = sanitizeRemoteImageUrl(resolveUrl(rawImage, baseUrl));
+
+        const rawTitle = pick(
+            'meta[property="og:title"]',
+            'meta[name="twitter:title"]',
+            'meta[name="title"]',
+            'title'
+        );
+        const remoteTitle = sanitizeRemoteText(rawTitle);
+
+        const rawDescription = pick(
+            'meta[property="og:description"]',
+            'meta[name="twitter:description"]',
+            'meta[name="description"]'
+        );
+        const remoteDescription = sanitizeRemoteText(rawDescription);
+
+        const rawPrice = pick(
+            'meta[property="product:price:amount"]',
+            'meta[itemprop="price"]',
+            'meta[property="og:price:amount"]',
+            'meta[name="twitter:data1"]',
+            'meta[name="price"]'
+        );
+        const rawCurrency = pick(
+            'meta[property="product:price:currency"]',
+            'meta[itemprop="priceCurrency"]',
+            'meta[property="og:price:currency"]',
+            'meta[name="twitter:label1"]'
+        );
+
+        let remotePrice = normalizeRemotePrice(rawPrice);
+        let remoteCurrency = normalizeCurrency(rawCurrency) || normalizeCurrency(rawPrice);
+
+        const jsonLdPrice = extractPriceFromJsonLd(doc);
+        if (jsonLdPrice) {
+            if (remotePrice === null && typeof jsonLdPrice.value === 'number') {
+                remotePrice = jsonLdPrice.value;
+            }
+            if (!remoteCurrency && jsonLdPrice.currency) {
+                remoteCurrency = jsonLdPrice.currency;
+            }
+        }
+
+        return {
+            imageUrl,
+            remoteTitle,
+            remoteDescription,
+            remotePrice,
+            remoteCurrency,
+            metadataFetchedAt: new Date().toISOString(),
+            loading: false
+        };
+    } catch (err) {
+        console.error('Не удалось распарсить HTML метаданных', err);
+        return null;
+    }
+}
+
+function extractPriceFromJsonLd(doc) {
+    if (!doc) return null;
+    const scripts = Array.from(doc.querySelectorAll('script[type="application/ld+json"]'));
+    for (const script of scripts) {
+        const payload = script.textContent?.trim();
+        if (!payload) continue;
+        try {
+            const json = JSON.parse(payload);
+            const result = findPriceInJsonLd(json);
+            if (result) return result;
+        } catch (err) {
+            continue;
+        }
+    }
+    return null;
+}
+
+function findPriceInJsonLd(node) {
+    if (!node || typeof node !== 'object') {
+        return null;
+    }
+
+    if (Array.isArray(node)) {
+        for (const entry of node) {
+            const found = findPriceInJsonLd(entry);
+            if (found) return found;
+        }
+        return null;
+    }
+
+    const candidate = normalizeMicrolinkPrice({
+        value: pickFirstPriceCandidate(
+            node.price,
+            node.priceValue,
+            node.lowPrice,
+            node.highPrice,
+            node.currentPrice,
+            node.offers?.price
+        ),
+        amount: node.amount,
+        price: node.price,
+        current: node.current
+            || node.currentPrice
+            || node.offers?.current
+            || node.offers?.currentPrice
+            || node.priceSpecification?.price,
+        text: node.priceText || node.text,
+        currency: node.priceCurrency
+            || node.currency
+            || node.currencyCode
+            || node.priceCurrencyCode
+            || node.offers?.priceCurrency
+            || node.priceSpecification?.priceCurrency,
+        currencyCode: node.currencyCode
+            || node.priceCurrency
+            || node.priceCurrencyCode
+            || node.offers?.currencyCode,
+        symbol: node.priceSymbol || node.currencySymbol || node.offers?.currencySymbol
+    });
+
+    if (candidate) {
+        return candidate;
+    }
+
+    const nestedKeys = ['offers', 'priceSpecification'];
+    for (const key of nestedKeys) {
+        if (node[key]) {
+            const nested = findPriceInJsonLd(node[key]);
+            if (nested) return nested;
+        }
+    }
+
+    for (const value of Object.values(node)) {
+        if (!value || typeof value !== 'object') continue;
+        const nested = findPriceInJsonLd(value);
+        if (nested) return nested;
+    }
+
+    return null;
+}
+
+async function fetchMicrolinkMetadata(url, options = {}) {
+    const requestUrl = buildMetadataRequestUrl(url, options);
+    const response = await fetch(requestUrl, {
+        headers: {
+            Accept: 'application/json'
+        }
+    });
+    if (!response.ok) {
+        throw new Error(`Microlink вернул код ${response.status}`);
+    }
+    const payload = await response.json();
+    if (!payload || payload.status !== 'success' || !payload.data) {
+        throw new Error('Microlink вернул некорректные данные');
+    }
+    return extractMetadataFromMicrolink(payload.data, url);
+}
+
+async function fetchHtmlMetadata(url, options = {}) {
+    const proxyUrl = buildHtmlProxyUrl(url, options);
+    const response = await fetch(proxyUrl, {
+        headers: {
+            Accept: 'text/html,application/xhtml+xml'
+        }
+    });
+    if (!response.ok) {
+        throw new Error(`HTML-прокси вернул код ${response.status}`);
+    }
+    const html = await response.text();
+    return extractMetadataFromHtml(html, url);
 }
 
 async function fetchAndNormalizeMetadata(url, options = {}) {
@@ -1397,22 +1637,41 @@ async function fetchAndNormalizeMetadata(url, options = {}) {
     }
 
     try {
-        const requestUrl = buildMetadataRequestUrl(url, { disableCache: force });
-        const response = await fetch(requestUrl, {
-            headers: {
-                Accept: 'application/json'
+        let finalMetadata = null;
+        let microlinkMetadata = null;
+
+        try {
+            microlinkMetadata = await fetchMicrolinkMetadata(url, { disableCache: force });
+        } catch (err) {
+            console.warn('Microlink не смог получить метаданные', err);
+        }
+
+        finalMetadata = microlinkMetadata;
+
+        const shouldTryHtml = !finalMetadata || shouldFallbackToHtml(finalMetadata);
+        if (shouldTryHtml) {
+            try {
+                const htmlMetadata = await fetchHtmlMetadata(url, { disableCache: force });
+                if (htmlMetadata) {
+                    finalMetadata = mergeMetadata(finalMetadata, htmlMetadata);
+                }
+            } catch (err) {
+                console.warn('HTML-прокси не смог получить метаданные', err);
             }
-        });
-        if (!response.ok) {
-            throw new Error(`Код ответа ${response.status}`);
         }
-        const payload = await response.json();
-        if (!payload || payload.status !== 'success' || !payload.data) {
-            throw new Error('Сервис вернул некорректные данные');
+
+        if (!finalMetadata) {
+            finalMetadata = createEmptyRuntimeMetadata(true);
         }
-        const metadata = extractMetadataFromMicrolink(payload.data, url);
-        setRuntimeMetadata(url, metadata);
-        return metadata;
+
+        finalMetadata = {
+            ...finalMetadata,
+            metadataFetchedAt: new Date().toISOString(),
+            loading: false
+        };
+
+        setRuntimeMetadata(url, finalMetadata);
+        return finalMetadata;
     } catch (err) {
         console.error('Сервис метаданных недоступен', err);
         const fallback = createEmptyRuntimeMetadata(true);
