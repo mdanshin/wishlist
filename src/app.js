@@ -301,6 +301,8 @@ function renderCurrentView() {
     if (initialSnapshotPending) {
         initialSnapshotPending = false;
         setLoadingState(false);
+    } else if (!loadingState.hidden) {
+        setLoadingState(false);
     }
     const prepared = applyFiltersAndSort(wishlistItems.slice());
     loadWishlist(prepared);
@@ -350,6 +352,7 @@ function applyFiltersAndSort(items) {
 }
 
 function loadWishlist(items) {
+    setLoadingState(false);
     itemsList.innerHTML = '';
     const isManual = filters.sort === 'manual';
     manualHint.hidden = !isManual || items.length <= 1;
