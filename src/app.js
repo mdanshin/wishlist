@@ -61,7 +61,7 @@ let draggedElement = null;
 const metadataUpdateQueue = new Map();
 const METADATA_TTL = 6 * 60 * 60 * 1000; // 6 часов
 // Универсальный прокси, возвращающий HTML-страницу с корректными CORS заголовками.
-const HTML_PROXY_ENDPOINT = 'https://api.allorigins.win/get?url=';
+const HTML_PROXY_ENDPOINT = 'https://api.allorigins.win/raw?url=';
 
 function setRuntimeMetadata(url, metadata) {
     if (!url) return;
@@ -1194,17 +1194,13 @@ async function fetchAndNormalizeMetadata(url, options = {}) {
         const proxiedUrl = buildProxiedUrl(url, { disableCache: force });
         const response = await fetch(proxiedUrl, {
             headers: {
-                Accept: 'application/json'
+                Accept: 'text/html,application/xhtml+xml'
             }
         });
         if (!response.ok) {
             throw new Error(`Код ответа ${response.status}`);
         }
-        const payload = await response.json();
-        const html = typeof payload?.contents === 'string' ? payload.contents : '';
-        if (!html) {
-            throw new Error('Прокси вернул пустой ответ');
-        }
+        const html = await response.text();
         const metadata = extractMetadataFromHtml(html, url);
         setRuntimeMetadata(url, metadata);
         return metadata;
