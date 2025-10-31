@@ -1304,17 +1304,14 @@ async function fetchAndNormalizeMetadata(url, options = {}) {
         metadataCache.delete(url);
     } else if (metadataCache.has(url)) {
         const cached = metadataCache.get(url);
-        if (!cached?.metadataFetchedAt) {
-            return cached;
-        }
-        const cachedTimestamp = Date.parse(cached.metadataFetchedAt);
+        const cachedTimestamp = cached?.metadataFetchedAt ? Date.parse(cached.metadataFetchedAt) : NaN;
         if (!Number.isNaN(cachedTimestamp)) {
             const age = Date.now() - cachedTimestamp;
             if (age <= METADATA_TTL) {
                 return cached;
             }
+            metadataCache.delete(url);
         }
-        metadataCache.delete(url);
     }
 
     try {
