@@ -1636,6 +1636,20 @@ async function fetchHtmlMetadata(url, options = {}) {
     return extractMetadataFromHtml(html, url);
 }
 
+async function fetchJsonViaProxy(targetUrl, options = {}) {
+    if (!targetUrl) return null;
+    const proxyUrl = buildHtmlProxyUrl(targetUrl, options);
+    const response = await fetch(proxyUrl, {
+        headers: {
+            Accept: 'application/json'
+        }
+    });
+    if (!response.ok) {
+        throw new Error(`Прокси вернул код ${response.status}`);
+    }
+    return response.json();
+}
+
 function isWildberriesUrl(candidate) {
     try {
         const { hostname } = new URL(candidate);
@@ -1686,7 +1700,7 @@ function extractWildberriesPrice(product) {
     return null;
 }
 
-async function fetchWildberriesMetadata(url) {
+async function fetchWildberriesMetadata(url, options = {}) {
     if (!isWildberriesUrl(url)) {
         return null;
     }
@@ -1697,15 +1711,7 @@ async function fetchWildberriesMetadata(url) {
 
     try {
         const apiUrl = `${WILDBERRIES_DETAIL_ENDPOINT}${nmId}`;
-        const response = await fetch(apiUrl, {
-            headers: {
-                Accept: 'application/json'
-            }
-        });
-        if (!response.ok) {
-            throw new Error(`Wildberries detail responded with ${response.status}`);
-        }
-        const payload = await response.json();
+        const payload = await fetchJsonViaProxy(apiUrl, options);
         const product = payload?.data?.products?.[0];
         if (!product) {
             return null;
@@ -1783,7 +1789,7 @@ async function fetchAndNormalizeMetadata(url, options = {}) {
 
         if (isWildberriesUrl(url)) {
             try {
-                const wbMetadata = await fetchWildberriesMetadata(url);
+                const wbMetadata = await fetchWildberriesMetadata(url, { disableCache: force });
                 if (wbMetadata) {
                     finalMetadata = mergeMetadata(finalMetadata, wbMetadata);
                 }
