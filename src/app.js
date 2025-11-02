@@ -84,6 +84,13 @@ const BLOCKED_METADATA_PATTERNS = [
 const OZON_DOMAIN_PATTERN = /(?:^|\.)ozon\.ru/i;
 const WILDBERRIES_DOMAIN_PATTERN = /(?:^|\.)wildberries\.ru/i;
 const WILDBERRIES_DETAIL_ENDPOINT = 'https://card.wb.ru/cards/v2/detail?appType=1&curr=rub&dest=-1257786&nm=';
+const WILDBERRIES_HOST_CACHE = new Map();
+const WILDBERRIES_HOST_INFLIGHT = new Map();
+const WILDBERRIES_MAX_HOST = 32;
+const WILDBERRIES_DEFAULT_IMAGE_KIND = 'big';
+const WILDBERRIES_DEFAULT_IMAGE_FORMAT = 'webp';
+const WILDBERRIES_DEFAULT_IMAGE_VARIANT = 'c516x688';
+const WILDBERRIES_IMAGE_VARIANTS = [WILDBERRIES_DEFAULT_IMAGE_VARIANT, WILDBERRIES_DEFAULT_IMAGE_KIND];
 
 function setRuntimeMetadata(url, metadata) {
     if (!url) return;
@@ -1676,12 +1683,98 @@ function extractWildberriesNmId(candidate) {
     return null;
 }
 
-function buildWildberriesImageUrl(nmId, imageIndex = 1) {
+function buildWildberriesPathParts(nmId) {
+    const vol = Math.floor(nmId / 100000);
+    const part = Math.floor(nmId / 1000);
+    return {
+        vol,
+        part
+    };
+}
+
+function buildWildberriesImageUrl(nmId, host, imageIndex = 1, variant = WILDBERRIES_DEFAULT_IMAGE_VARIANT) {
+    if (typeof nmId !== 'number' || !Number.isFinite(nmId) || typeof host !== 'number' || host <= 0) {
+        return '';
+    }
+    const { vol, part } = buildWildberriesPathParts(nmId);
+    const hostSuffix = String(host).padStart(2, '0');
+    const folder = variant ? `${variant}` : WILDBERRIES_DEFAULT_IMAGE_KIND;
+    return `https://basket-${hostSuffix}.wb.ru/vol${vol}/part${part}/${nmId}/images/${folder}/${imageIndex}.${WILDBERRIES_DEFAULT_IMAGE_FORMAT}`;
+}
+
+function buildWildberriesHostCandidates(nmId) {
+    const candidates = new Set();
+    if (typeof nmId !== 'number' || !Number.isFinite(nmId)) {
+        return [];
+    }
+    const { vol, part } = buildWildberriesPathParts(nmId);
+    const addCandidate = (value) => {
+        if (typeof value !== 'number' || !Number.isFinite(value)) return;
+        const mod = Math.abs(Math.trunc(value)) % WILDBERRIES_MAX_HOST;
+        const normalized = mod === 0 ? WILDBERRIES_MAX_HOST : mod;
+        candidates.add(normalized);
+    };
+
+    addCandidate(part % 16);
+    addCandidate(part % 32);
+    addCandidate(vol % 16);
+    addCandidate(vol % 32);
+    addCandidate(nmId % 16);
+    addCandidate(nmId % 32);
+
+    for (let host = 1; host <= WILDBERRIES_MAX_HOST; host += 1) {
+        candidates.add(host);
+    }
+
+    return Array.from(candidates);
+}
+
+async function resolveWildberriesImageUrl(nmId, imageIndex = 1) {
     if (typeof nmId !== 'number' || !Number.isFinite(nmId)) {
         return '';
     }
-    const baseFolder = Math.floor(nmId / 1000) * 1000;
-    return `https://images.wbstatic.net/c516x688/new/${baseFolder}/${nmId}-${imageIndex}.jpg`;
+
+    if (typeof fetch !== 'function') {
+        return '';
+    }
+
+    if (WILDBERRIES_HOST_CACHE.has(nmId)) {
+        const cachedEntry = WILDBERRIES_HOST_CACHE.get(nmId);
+        if (cachedEntry && typeof cachedEntry.host === 'number') {
+            return buildWildberriesImageUrl(nmId, cachedEntry.host, imageIndex, cachedEntry.variant);
+        }
+        return '';
+    }
+
+    if (WILDBERRIES_HOST_INFLIGHT.has(nmId)) {
+        return WILDBERRIES_HOST_INFLIGHT.get(nmId);
+    }
+
+    const resolverPromise = (async () => {
+        const candidates = buildWildberriesHostCandidates(nmId);
+        for (const host of candidates) {
+            for (const variant of WILDBERRIES_IMAGE_VARIANTS) {
+                const candidateUrl = buildWildberriesImageUrl(nmId, host, imageIndex, variant);
+                if (!candidateUrl) continue;
+                try {
+                    const response = await fetch(candidateUrl, { method: 'HEAD', mode: 'cors' });
+                    if (response.ok) {
+                        WILDBERRIES_HOST_CACHE.set(nmId, { host, variant });
+                        return candidateUrl;
+                    }
+                } catch (err) {
+                    continue;
+                }
+            }
+        }
+    WILDBERRIES_HOST_CACHE.set(nmId, null);
+        return '';
+    })().finally(() => {
+        WILDBERRIES_HOST_INFLIGHT.delete(nmId);
+    });
+
+    WILDBERRIES_HOST_INFLIGHT.set(nmId, resolverPromise);
+    return resolverPromise;
 }
 
 function extractWildberriesPrice(product) {
@@ -1717,9 +1810,10 @@ async function fetchWildberriesMetadata(url, options = {}) {
             return null;
         }
 
-        const priceInfo = extractWildberriesPrice(product);
-        const remoteTitle = sanitizeRemoteText(product.name || product.brand || '');
-        const imageUrl = sanitizeRemoteImageUrl(buildWildberriesImageUrl(nmId));
+    const priceInfo = extractWildberriesPrice(product);
+    const remoteTitle = sanitizeRemoteText(product.name || product.brand || '');
+    const resolvedImageUrl = await resolveWildberriesImageUrl(nmId);
+    const imageUrl = sanitizeRemoteImageUrl(resolvedImageUrl);
         const infoParts = [];
         if (product.brand) {
             infoParts.push(`Бренд: ${product.brand}`);
