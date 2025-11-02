@@ -82,6 +82,8 @@ const BLOCKED_METADATA_PATTERNS = [
     /forbidden/i
 ];
 const OZON_DOMAIN_PATTERN = /(?:^|\.)ozon\.ru/i;
+const WILDBERRIES_DOMAIN_PATTERN = /(?:^|\.)wildberries\.ru/i;
+const WILDBERRIES_DETAIL_ENDPOINT = 'https://card.wb.ru/cards/v2/detail?appType=1&curr=rub&dest=-1257786&nm=';
 
 function setRuntimeMetadata(url, metadata) {
     if (!url) return;
@@ -1401,15 +1403,29 @@ function mergeMetadata(primary, secondary) {
     if (!secondary) return primary;
     const merged = {
         ...primary,
-        imageUrl: primary.imageUrl || secondary.imageUrl,
-        remoteTitle: primary.remoteTitle || secondary.remoteTitle,
-        remoteDescription: primary.remoteDescription || secondary.remoteDescription,
-        remotePrice:
-            typeof primary.remotePrice === 'number' && Number.isFinite(primary.remotePrice)
-                ? primary.remotePrice
-                : secondary.remotePrice,
-        remoteCurrency: primary.remoteCurrency || secondary.remoteCurrency
+        ...secondary
     };
+
+    merged.imageUrl = sanitizeRemoteImageUrl(secondary.imageUrl || primary.imageUrl || '');
+    merged.remoteTitle = sanitizeRemoteText(secondary.remoteTitle || primary.remoteTitle || '');
+    merged.remoteDescription = sanitizeRemoteText(secondary.remoteDescription || primary.remoteDescription || '');
+
+    merged.remotePrice = typeof secondary.remotePrice === 'number' && Number.isFinite(secondary.remotePrice)
+        ? secondary.remotePrice
+        : typeof primary.remotePrice === 'number' && Number.isFinite(primary.remotePrice)
+        ? primary.remotePrice
+        : null;
+
+    merged.remoteCurrency = secondary.remoteCurrency || primary.remoteCurrency || '';
+
+    if (secondary.blocked !== undefined) {
+        merged.blocked = Boolean(secondary.blocked);
+        merged.blockedReason = merged.blocked ? (secondary.blockedReason || primary.blockedReason || '') : '';
+    } else {
+        merged.blocked = Boolean(primary.blocked);
+        merged.blockedReason = merged.blocked ? (primary.blockedReason || '') : '';
+    }
+
     return merged;
 }
 
@@ -1620,6 +1636,111 @@ async function fetchHtmlMetadata(url, options = {}) {
     return extractMetadataFromHtml(html, url);
 }
 
+function isWildberriesUrl(candidate) {
+    try {
+        const { hostname } = new URL(candidate);
+        return WILDBERRIES_DOMAIN_PATTERN.test(hostname);
+    } catch (err) {
+        return false;
+    }
+}
+
+function extractWildberriesNmId(candidate) {
+    try {
+        const url = new URL(candidate);
+        const queryNm = url.searchParams.get('nm');
+        if (queryNm && /\d{6,}/.test(queryNm)) {
+            return Number.parseInt(queryNm, 10);
+        }
+        const match = url.pathname.match(/catalog\/(\d{6,})/i);
+        if (match) {
+            return Number.parseInt(match[1], 10);
+        }
+    } catch (err) {
+        return null;
+    }
+    return null;
+}
+
+function buildWildberriesImageUrl(nmId, imageIndex = 1) {
+    if (typeof nmId !== 'number' || !Number.isFinite(nmId)) {
+        return '';
+    }
+    const baseFolder = Math.floor(nmId / 1000) * 1000;
+    return `https://images.wbstatic.net/c516x688/new/${baseFolder}/${nmId}-${imageIndex}.jpg`;
+}
+
+function extractWildberriesPrice(product) {
+    if (!product || !Array.isArray(product.sizes)) {
+        return null;
+    }
+    for (const size of product.sizes) {
+        const price = size?.price;
+        if (price && typeof price.product === 'number' && price.product > 0) {
+            return {
+                value: Number(price.product) / 100,
+                currency: 'RUB'
+            };
+        }
+    }
+    return null;
+}
+
+async function fetchWildberriesMetadata(url) {
+    if (!isWildberriesUrl(url)) {
+        return null;
+    }
+    const nmId = extractWildberriesNmId(url);
+    if (!nmId) {
+        return null;
+    }
+
+    try {
+        const apiUrl = `${WILDBERRIES_DETAIL_ENDPOINT}${nmId}`;
+        const response = await fetch(apiUrl, {
+            headers: {
+                Accept: 'application/json'
+            }
+        });
+        if (!response.ok) {
+            throw new Error(`Wildberries detail responded with ${response.status}`);
+        }
+        const payload = await response.json();
+        const product = payload?.data?.products?.[0];
+        if (!product) {
+            return null;
+        }
+
+        const priceInfo = extractWildberriesPrice(product);
+        const remoteTitle = sanitizeRemoteText(product.name || product.brand || '');
+        const imageUrl = sanitizeRemoteImageUrl(buildWildberriesImageUrl(nmId));
+        const infoParts = [];
+        if (product.brand) {
+            infoParts.push(`Бренд: ${product.brand}`);
+        }
+        if (product.entity) {
+            infoParts.push(`Категория: ${product.entity}`);
+        }
+        if (product.supplier) {
+            infoParts.push(`Продавец: ${product.supplier}`);
+        }
+        const remoteDescription = sanitizeRemoteText(infoParts.join(' · '));
+
+        return {
+            imageUrl,
+            remoteTitle,
+            remoteDescription,
+            remotePrice: priceInfo?.value ?? null,
+            remoteCurrency: priceInfo?.currency ?? 'RUB',
+            metadataFetchedAt: new Date().toISOString(),
+            loading: false
+        };
+    } catch (err) {
+        console.warn('Не удалось получить данные Wildberries', err);
+        return null;
+    }
+}
+
 async function fetchAndNormalizeMetadata(url, options = {}) {
     const { force = false } = options;
     if (force) {
@@ -1657,6 +1778,17 @@ async function fetchAndNormalizeMetadata(url, options = {}) {
                 }
             } catch (err) {
                 console.warn('HTML-прокси не смог получить метаданные', err);
+            }
+        }
+
+        if (isWildberriesUrl(url)) {
+            try {
+                const wbMetadata = await fetchWildberriesMetadata(url);
+                if (wbMetadata) {
+                    finalMetadata = mergeMetadata(finalMetadata, wbMetadata);
+                }
+            } catch (err) {
+                console.warn('Wildberries API не ответил', err);
             }
         }
 
